@@ -340,7 +340,7 @@ class SLMService(dbus.service.Object):
                                             result_code,
                                             result_text)
 
-    @dbus.service.method("org.genivi.software_loading_manager")
+    @dbus.service.method("org.genivi.software_loading_manager", out_signature='aa{sv}')
     def get_installed_packages(self): 
         print "Got get_installed_packages()"
         return [ { "package_id": "bluez_driver", 
