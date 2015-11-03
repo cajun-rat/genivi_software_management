@@ -6,11 +6,15 @@
 
 
 
-import gtk
+import gobject
 import dbus
 import dbus.service
 from dbus.mainloop.glib import DBusGMainLoop
 
+from slmtypes import NO_UPDATES, AWAITING_APPROVAL, INSTALLING, ERROR
+
+DBUS_INTERFACE="org.genivi.software_loading_manager"
+DBUS_BUSNAME=DBUS_INTERFACE
             
     
 #
@@ -30,14 +34,25 @@ class SLMService(dbus.service.Object):
         dbus.service.Object.__init__(self, 
                                      self.slm_bus_name, 
                                      "/org/genivi/software_loading_manager")
+        self._updates = []
+        self.update_state_changed(NO_UPDATES, 0)
 
+    @dbus.service.method(DBUS_INTERFACE)
+    def update_count(self):
+        return len(self._updates)
 
+    @dbus.service.method(DBUS_INTERFACE)
+    def update_state(self):
+       return self._state
 
+    @dbus.service.signal(DBUS_INTERFACE)
+    def update_state_changed(self, newstate, count):
+        self._state = newstate
 
     # 
     # Distribute a report of a completed installation
     # to all involved parties. So far those parties are
-    # the HMI and the SOTA client
+    # the SOTA client
     #
     def distribute_installation_report(self, 
                                        package_id, 
@@ -52,32 +67,6 @@ class SLMService(dbus.service.Object):
                                        target,
                                        result_code, 
                                        result_msg):
-        #
-        # Retrieve HMI bus name, object, and installation report method
-        #
-
-        hmi_bus_name = dbus.service.BusName("org.genivi.hmi", bus=self.bus)
-        hmi_obj = self.bus.get_object(hmi_bus_name.get_name(), "/org/genivi/hmi")
-        hmi_installation_report = hmi_obj.get_dbus_method("installation_report", 
-                                                          "org.genivi.hmi")
-
-
-        # Send installation report to HMI
-        print "Sending report to hmi.installation_report()"
-        hmi_installation_report(package_id, 
-                                major, 
-                                minor, 
-                                patch, 
-                                command, 
-                                path,
-                                size,
-                                description, 
-                                vendor, 
-                                target,
-                                result_code, 
-                                result_msg)
-
-
         #
         # Retrieve SOTA bus name, object, and installation report method
         #
@@ -101,11 +90,7 @@ class SLMService(dbus.service.Object):
                                  result_code, 
                                  result_msg)
 
-
-        
-    
-
-    @dbus.service.method("org.genivi.software_loading_manager")
+    @dbus.service.method(DBUS_INTERFACE)
     def package_available(self, 
                           package_id, 
                           major, 
@@ -116,16 +101,6 @@ class SLMService(dbus.service.Object):
                           description, 
                           vendor,
                           target): 
-
-        #
-        # Locate HMI bus, object, and package_notification() call.
-        #
-        hmi_bus_name = dbus.service.BusName("org.genivi.hmi", bus=self.bus)
-        hmi_obj = self.bus.get_object(hmi_bus_name.get_name(), "/org/genivi/hmi")
-
-        hmi_package_notification = hmi_obj.get_dbus_method("package_notification", 
-                                                            "org.genivi.hmi")
-
 
         print "Got package available"
         print "  ID:     {}".format(package_id)
@@ -141,64 +116,40 @@ class SLMService(dbus.service.Object):
         # Once user has responded, HMI will invoke self.package_confirmation()
         # to drive the use case forward.
         #
-        hmi_package_notification(package_id, 
-                                  major, 
-                                  minor, 
-                                  patch, 
-                                  command, 
-                                  size, 
-                                  description, 
-                                  vendor,
-                                  target)
+        self._updates.append((package_id, major, minor, patch, command, size, description, vendor, target))
 
-        print "Called hmi.package_notification()"
-        print "---"
-        return None
+        self.update_state_changed(AWAITING_APPROVAL, len(self._updates))
         
-        
-    @dbus.service.method("org.genivi.software_loading_manager",
+    @dbus.service.method(DBUS_INTERFACE,
                          async_callbacks=('send_reply', 'send_error'))
-    def package_confirmation(self,        
-                             approved,
-                             package_id, 
-                             major, 
-                             minor, 
-                             patch, 
-                             command, 
-                             size, 
-                             description, 
-                             vendor,
-                             target, 
-                             send_reply, 
-                             send_error): 
-
+    def approve(self, send_reply, send_error):
         
         # Send back an immediate reply since DBUS
         # doesn't like python dbus-invoked methods to do 
         # their own calls (nested calls).
-        #
+
         send_reply(True)
 
-        #
         # Find the local sota client bus, object and method.
-        #
-        sota_client_bus_name = dbus.service.BusName("org.genivi.sota_client", bus=self.bus)
+        sota_client_bus_name = dbus.service.BusName("org.genivi.sota_client",
+                                                    bus=self.bus)
         sota_client_obj = self.bus.get_object(sota_client_bus_name.get_name(), 
                                               "/org/genivi/sota_client")
-
-        sota_initiate_download = sota_client_obj.get_dbus_method("initiate_download", 
-                                                                 "org.genivi.sota_client")
+        sota_initiate_download = sota_client_obj.get_dbus_method(
+                            "initiate_download", "org.genivi.sota_client")
+        print "User has approved the installation of %d packages" % len(self._updates)
+        for update in self._updates:
+            (package_id, major, minor, patch,
+             command, size, description, vendor, target) = update
         
-        print "Got package_confirmation()."
-        print "  Approved: {}".format(approved)
-        print "  ID:       {}".format(package_id)
-        print "  ver:      {}.{}.{} ".format(major, minor, patch)
-        print "  cmd:      {}".format(command)
-        print "  size:     {}".format(size)
-        print "  descr:    {}".format(description)
-        print "  vendor:   {}".format(vendor)
-        print "  target:   {}".format(target)
-        if approved:
+            print "Got package_confirmation()."
+            print "  ID:       {}".format(package_id)
+            print "  ver:      {}.{}.{} ".format(major, minor, patch)
+            print "  cmd:      {}".format(command)
+            print "  size:     {}".format(size)
+            print "  descr:    {}".format(description)
+            print "  vendor:   {}".format(vendor)
+            print "  target:   {}".format(target)
             #
             # Call the SOTA client and ask it to start the download.
             # Once the download is complete, SOTA client will call 
@@ -209,25 +160,7 @@ class SLMService(dbus.service.Object):
             sota_initiate_download(package_id, major, minor, patch)
             print "Approved: Called sota_client.initiate_download()"
             print "---"
-        else:
-            # User did not approve. Send installation report
-            print "Declined: Will call installation_report()"
-            self.distribute_installation_report(package_id, 
-                                                major, 
-                                                minor, 
-                                                patch, 
-                                                command, 
-                                                '', # No path yet since it was declined
-                                                size,
-                                                description, 
-                                                vendor, 
-                                                target,
-                                                2, 
-                                                'Package declined by user')
-            print "Declined. Called sota_client.installation_report()"
-            print "---"
-
-            
+        self.update_state_changed(INSTALLING, len(self._updates))
         return None
         
     @dbus.service.method("org.genivi.software_loading_manager", 
@@ -313,7 +246,7 @@ class SLMService(dbus.service.Object):
                             result_code,
                             result_text): 
 
-        print "Got intstallation_report()"
+        print "Got installation report()"
         print "  ID:          {}".format(package_id)
         print "  ver:         {}.{}.{} ".format(major, minor, patch)
         print "  cmd:         {}".format(command)
@@ -325,22 +258,13 @@ class SLMService(dbus.service.Object):
         print "  result_code: {}".format(result_code)
         print "  result_text: {}".format(result_text)
         print "---"
+        if (result_code == 0):
+            self.update_state_changed(NO_UPDATES, 0)
+            self._updates = []
+        else:
+            self.update_state_changed(ERROR, len(self._updates))
 
-        # Send out the report to interested parties
-        self.distribute_installation_report(package_id, 
-                                            major, 
-                                            minor, 
-                                            patch, 
-                                            command, 
-                                            path,
-                                            size, 
-                                            description, 
-                                            vendor,
-                                            target,
-                                            result_code,
-                                            result_text)
-
-    @dbus.service.method("org.genivi.software_loading_manager", out_signature='aa{sv}')
+    @dbus.service.method(DBUS_INTERFACE, out_signature='aa{sv}')
     def get_installed_packages(self): 
         print "Got get_installed_packages()"
         return [ { "package_id": "bluez_driver", 
@@ -352,13 +276,13 @@ class SLMService(dbus.service.Object):
                    "minor": 2,
                    "patch": 1 } ]
                  
+if __name__ == "__main__":
+    print
+    print "Software Loading Manager."
+    print
 
-print 
-print "Software Loading Manager."
-print
-
-DBusGMainLoop(set_as_default=True)
-slm_sota = SLMService()
-
-while True:
-    gtk.main_iteration()
+    DBusGMainLoop(set_as_default=True)
+    slm_sota = SLMService()
+    loop = gobject.MainLoop()
+    loop.run()
+# vim: set expandtab tabstop=4 shiftwidth=4:
