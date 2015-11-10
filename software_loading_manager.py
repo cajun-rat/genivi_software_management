@@ -259,14 +259,14 @@ class SLMService(dbus.service.Object):
     # once they have completed their process_package() calls invoked
     # by software_loading_manager
     #
-    @dbus.service.method("org.genivi.software_loading_manager")
+    @dbus.service.method("org.genivi.software_loading_manager", signature="ssiiisisssis")
     def installation_report(self, 
+                            path,
                             package_id, 
                             major, 
                             minor, 
                             patch, 
                             command, 
-                            path,
                             size, 
                             description, 
                             vendor,
@@ -286,6 +286,7 @@ class SLMService(dbus.service.Object):
         print "  result_code: {}".format(result_code)
         print "  result_text: {}".format(result_text)
         print "---"
+        self.details_changed(package_id, "%d.%d.%d" % (major,minor,patch), "installed")
         if (result_code == 0):
             self.update_state_changed(NO_UPDATES, 0)
             self._updates = []
