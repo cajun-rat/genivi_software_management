@@ -49,6 +49,26 @@ class SLMService(dbus.service.Object):
     def update_state_changed(self, newstate, count):
         self._state = newstate
 
+    @dbus.service.method(DBUS_INTERFACE, out_signature='aa{sv}')
+    def details(self):
+        r = []
+        for package_id, major, minor, patch, command, size, description, vendor, target in self._updates:
+            d = {
+                'name': package_id,
+                'size': size,
+                'version': '%d.%d.%d' % (major, minor, patch),
+            }
+            if self._state == INSTALLING:
+                d['status'] = 'installing'
+            else:
+                d['status'] = 'pending'
+            r.append(d)
+        return r
+
+    @dbus.service.signal(DBUS_INTERFACE, signature="sss")
+    def details_changed(self, name, version, state):
+        print "details_changed %r %r %r" % (name, version, state)
+        pass
     # 
     # Distribute a report of a completed installation
     # to all involved parties. So far those parties are
@@ -90,7 +110,7 @@ class SLMService(dbus.service.Object):
                                  result_code, 
                                  result_msg)
 
-    @dbus.service.method(DBUS_INTERFACE)
+    @dbus.service.method(DBUS_INTERFACE, in_signature="siiisisss")
     def package_available(self, 
                           package_id, 
                           major, 
@@ -122,14 +142,14 @@ class SLMService(dbus.service.Object):
         
     @dbus.service.method(DBUS_INTERFACE,
                          async_callbacks=('send_reply', 'send_error'))
-    def approve(self, send_reply, send_error):
+    def approve(self, packages, send_reply, send_error):
         
         # Send back an immediate reply since DBUS
         # doesn't like python dbus-invoked methods to do 
         # their own calls (nested calls).
 
         send_reply(True)
-
+        packages_approved = set([name for name, version in packages])
         # Find the local sota client bus, object and method.
         sota_client_bus_name = dbus.service.BusName("org.genivi.sota_client",
                                                     bus=self.bus)
@@ -137,11 +157,16 @@ class SLMService(dbus.service.Object):
                                               "/org/genivi/sota_client")
         sota_initiate_download = sota_client_obj.get_dbus_method(
                             "initiate_download", "org.genivi.sota_client")
-        print "User has approved the installation of %d packages" % len(self._updates)
+        print "User has approved the installation of %d of %d packages" % (len(packages) , len(self._updates))
+        has_started_installing = False
         for update in self._updates:
             (package_id, major, minor, patch,
              command, size, description, vendor, target) = update
         
+            if package_id not in packages_approved:
+                print "Skipping package %s that wasn't approved" % package_id
+                continue
+            has_started_installing = True
             print "Got package_confirmation()."
             print "  ID:       {}".format(package_id)
             print "  ver:      {}.{}.{} ".format(major, minor, patch)
@@ -157,10 +182,12 @@ class SLMService(dbus.service.Object):
             # process the package.
             #
             print "Approved: Will call initiate_download()"
+            self.details_changed(package_id, "%d.%d.%d" % (major,minor,patch), "downloading")
             sota_initiate_download(package_id, major, minor, patch)
             print "Approved: Called sota_client.initiate_download()"
             print "---"
-        self.update_state_changed(INSTALLING, len(self._updates))
+        if has_started_installing:
+            self.update_state_changed(INSTALLING, len(self._updates))
         return None
         
     @dbus.service.method("org.genivi.software_loading_manager", 
@@ -211,6 +238,7 @@ class SLMService(dbus.service.Object):
         # Locate and invoke the correct package processor 
         # (ECU1ModuleLoaderProcessor.process_impl(), etc)
         #
+        self.details_changed(package_id, "%d.%d.%d" % (major,minor,patch), "installing")
         process_package(package_id,
                         major, 
                         minor, 
